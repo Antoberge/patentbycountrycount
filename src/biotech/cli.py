@@ -10,6 +10,7 @@ import typer
 from rich import print
 from dotenv import load_dotenv
 import matplotlib.pyplot as plt
+import yaml
 
 from .bq_fetch import BQConfig, run_query_from_file
 from .transform import stata_like_pct_nbr
@@ -115,6 +116,14 @@ def run(
     print(f"Saved metadata to {meta_path}")
 
 
+def _load_report_config(path: Path) -> dict:
+    defaults = {"plot_start_year": 1980, "plot_end_year": None}
+    if not path.exists():
+        return defaults
+    data = yaml.safe_load(path.read_text()) or {}
+    return {**defaults, **data}
+
+
 @app.command()
 def report(
     input_csv: Path = typer.Option(
@@ -124,6 +133,7 @@ def report(
     ),
     out_dir: Path = typer.Option(Path("reports"), help="Folder for charts and tables."),
     recent_start: int = typer.Option(2010, help="Start year for recent totals."),
+    config_file: Path = typer.Option(Path("config/report.yml"), help="YAML config for plots."),
 ):
     """Generate plots and summary tables from the fractional counts CSV."""
 
@@ -135,8 +145,8 @@ def report(
             f"Input CSV must contain {', '.join(sorted(required_cols))}."
         )
     df["filing_year"] = df["filing_year"].astype(int)
-
-    ts = _build_group_series(df)
+    cfg = _load_report_config(config_file)
+    ts = _build_group_series(df, cfg)
     ts_path = out_dir / "timeseries_selected_countries.png"
     _plot_timeseries(ts, ts_path, "Fractional patents by country group")
     print(f"Saved time-series chart to {ts_path}")
@@ -151,7 +161,10 @@ def report(
     print(f"Saved top patenters table to {table_path}")
 
 
-def _build_group_series(df: pd.DataFrame) -> pd.DataFrame:
+def _build_group_series(df: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
+    cfg = cfg or {}
+    start_year = cfg.get("plot_start_year", 1980)
+    end_year = cfg.get("plot_end_year")
     pivot = (
         df.pivot_table(
             index="filing_year",
@@ -162,6 +175,9 @@ def _build_group_series(df: pd.DataFrame) -> pd.DataFrame:
         )
         .sort_index()
     )
+    pivot = pivot[pivot.index >= start_year]
+    if end_year:
+        pivot = pivot[pivot.index <= end_year]
     groups = {}
     for label, codes in GROUP_DEFINITIONS:
         existing = [code for code in codes if code in pivot.columns]
@@ -180,33 +196,93 @@ def _build_group_series(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _plot_timeseries(ts: pd.DataFrame, path: Path, title: str) -> None:
-    plt.figure(figsize=(11, 5))
-    for col in ts.columns:
-        plt.plot(ts.index, ts[col], label=col)
-    plt.xlabel("Filing year")
-    plt.ylabel("Fractional patents")
-    plt.title(title)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(path, dpi=300)
-    plt.close()
+    palette = plt.get_cmap("tab20")
+    fig, ax = plt.subplots(figsize=(11, 5))
+    for idx, col in enumerate(ts.columns):
+        ax.plot(ts.index, ts[col], label=col, color=palette(idx), linewidth=2)
+    _apply_chad_style(ax, "Filing year", "Fractional patents", title)
+    ax.set_xlim(ts.index.min(), ts.index.max())
+    ax.legend(
+        loc="upper center",
+        frameon=False,
+        fontsize=10,
+        bbox_to_anchor=(0.5, -0.2),
+        ncol=3,
+    )
+    fig.subplots_adjust(left=0.12, right=0.98, top=0.90, bottom=0.28)
+    fig.savefig(path, dpi=300)
+    plt.close(fig)
 
 
 def _plot_stacked_share(ts: pd.DataFrame, path: Path, title: str) -> None:
     share = ts.div(ts.sum(axis=1), axis=0).fillna(0)
-    plt.figure(figsize=(11, 5))
-    plt.stackplot(
+    fig, ax = plt.subplots(figsize=(11, 5))
+    palette = plt.get_cmap("tab20")
+    ax.stackplot(
         share.index,
         [share[col] for col in share.columns],
         labels=share.columns,
+        colors=[palette(i) for i in range(len(share.columns))],
+        linewidth=1,
     )
-    plt.xlabel("Filing year")
-    plt.ylabel("Share of fractional patents")
-    plt.title(title)
-    plt.legend(loc="upper center", ncol=3)
-    plt.tight_layout()
-    plt.savefig(path, dpi=300)
-    plt.close()
+    _apply_chad_style(ax, "Filing year", "Share of fractional patents", title)
+    ax.set_xlim(share.index.min(), share.index.max())
+    ax.legend(
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.2),
+        ncol=3,
+        frameon=False,
+        fontsize=10,
+    )
+    fig.savefig(path, dpi=300)
+    fig.subplots_adjust(left=0.12, right=0.98, top=0.90, bottom=0.28)
+    plt.close(fig)
+
+
+def _apply_chad_style(ax: plt.Axes, xlabel: str, ylabel: str, title: str) -> None:
+    ax.set_title(title, fontsize=13, fontweight="bold", pad=10)
+    ax.set_xlabel(xlabel, fontweight="bold", fontsize=12)
+    ax.set_ylabel(ylabel, fontweight="bold", fontsize=12)
+
+    # Keep real axis lines so ticks don't float
+    ax.spines["left"].set_visible(True)
+    ax.spines["bottom"].set_visible(True)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    # Put ticks/labels outside
+    ax.tick_params(axis="y", left=True, right=False, labelleft=True,
+                   direction="out", pad=10, length=4, width=1.0, labelsize=11)
+    ax.tick_params(axis="x", bottom=True, top=False, labelbottom=True,
+                   direction="out", pad=6, length=4, width=1.0, labelsize=11)
+
+    ax.grid(False)
+
+    # Optional arrowheads only (no extra lines)
+    _add_axis_arrowheads(ax)
+
+
+
+def _add_axis_arrowheads(ax: plt.Axes) -> None:
+    arrowprops = dict(arrowstyle="-|>", color="black", lw=1.2, mutation_scale=18)
+
+    # short arrowhead at end of x-axis
+    ax.annotate(
+        "",
+        xy=(1.02, 0.0), xytext=(0.97, 0.0),
+        xycoords="axes fraction", textcoords="axes fraction",
+        arrowprops=arrowprops,
+        annotation_clip=False,
+    )
+
+    # short arrowhead at end of y-axis
+    ax.annotate(
+        "",
+        xy=(0.0, 1.02), xytext=(0.0, 0.97),
+        xycoords="axes fraction", textcoords="axes fraction",
+        arrowprops=arrowprops,
+        annotation_clip=False,
+    )
 
 
 def _build_top_table(df: pd.DataFrame, recent_start: int) -> pd.DataFrame:

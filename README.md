@@ -47,7 +47,7 @@ PYTHONPATH=src python -m biotech.cli report \
   --out-dir reports \
   --recent-start 2010
 ```
-This produces line charts, stacked-share charts, and `reports/top_patenters.csv` (totals for the full period and since 2010).
+Edit `config/report.yml` (e.g., `plot_end_year: 2024`) to customize the plotting window. The command produces line charts, stacked-share charts, and `reports/top_patenters.csv` (totals for the full period and since 2010).
 
 ## Push to GitHub
 1. Ensure the remote points to your repo (`git remote -v`).
