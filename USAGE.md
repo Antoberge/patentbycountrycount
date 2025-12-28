@@ -14,16 +14,17 @@ pip install -r requirements.txt
 
 ## 3. Data inputs
 - Drop OECD `regpat.txt` into `data/raw/`.
-- Place your BigQuery SQL query in `queries/biotech.sql` (or pass another file via `--query-file`).
+- Place your BigQuery SQL query inside `queries/` and point `--query-file` to it.
 
 ## 4. Run
 
 ```bash
-PYTHONPATH=src python -m biotech.cli run \
+PYTHONPATH=src python -m pipeline.cli run \
   --query-file queries/biotech.sql \
   --regpat-file data/raw/regpat.txt \
   --out-dir data/output \
   --cache-dir data/processed
+  # add --category-column <colname> if your query includes categories
 ```
 
 Flags:
@@ -38,7 +39,7 @@ Outputs:
 ## 5. Generate charts/tables
 
 ```bash
-PYTHONPATH=src python -m biotech.cli report \
+PYTHONPATH=src python -m pipeline.cli report \
   --input-csv data/output/inventor_country_yearly_fractional_counts.csv \
   --out-dir reports \
   --recent-start 2010

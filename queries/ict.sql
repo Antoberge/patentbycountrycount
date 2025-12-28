@@ -56,7 +56,7 @@ WITH categorized_patents AS (
         FROM UNNEST(ipc) AS i
       )
       WHERE tech_group IS NOT NULL
-    ) AS tech_group_id
+    ) AS ict_category
   FROM
     `patents-public-data.patents.publications`
   WHERE
@@ -65,8 +65,8 @@ WITH categorized_patents AS (
 SELECT
   publication_number,
   filing_date,
-  tech_group_id
+  ict_category
 FROM
   categorized_patents
 WHERE
-  tech_group_id IS NOT NULL
+  ict_category IS NOT NULL

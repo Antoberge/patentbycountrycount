@@ -20,8 +20,11 @@ def _fix_wo_century(pub: str) -> str:
     return pub
 
 
-def stata_like_pct_nbr(df: pd.DataFrame, publication_col: str = "publication_number") -> pd.DataFrame:
-
+def stata_like_pct_nbr(
+    df: pd.DataFrame,
+    publication_col: str = "publication_number",
+    extra_columns: list[str] | None = None,
+) -> pd.DataFrame:
     out = df.copy()
 
     # Fix century in WO numbers
@@ -37,12 +40,17 @@ def stata_like_pct_nbr(df: pd.DataFrame, publication_col: str = "publication_num
     lengths = pct_left.str.len()
     pct_left = pct_left.where(lengths != 11, pct_left.str.slice(0, 6) + "0" + pct_left.str.slice(6))
 
-    pct_df = pd.DataFrame({
-        "pct_nbr": pct_left,
-        "filing_date": out.get("filing_date"),
-    })
-    pct_df = pct_df.dropna(subset=["pct_nbr", "filing_date"])
+    data = {"pct_nbr": pct_left}
+    extras = extra_columns or []
+    for col in extras:
+        if col in out.columns:
+            data[col] = out[col].values
+
+    pct_df = pd.DataFrame(data)
+    subset_cols = ["pct_nbr"]
+    if "filing_date" in pct_df.columns:
+        subset_cols.append("filing_date")
+    pct_df = pct_df.dropna(subset=subset_cols)
     pct_df = pct_df[pct_df["pct_nbr"].str.len() >= 10]
     pct_df = pct_df.drop_duplicates(subset=["pct_nbr"], keep="first").reset_index(drop=True)
-
     return pct_df

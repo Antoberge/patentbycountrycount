@@ -43,6 +43,10 @@ def run(
     cache_dir: Path = typer.Option(Path("data/processed"), help="Cache directory."),
     chunksize: int = typer.Option(1_000_000, help="Chunk size for regpat reading."),
     regpat_sep: str = typer.Option("\t", help="Column separator for regpat file (default tab)."),
+    category_column: str | None = typer.Option(
+        None,
+        help="Optional column in the BigQuery result used to split counts by category.",
+    ),
 ):
     """
     Runs the full pipeline:
@@ -59,61 +63,17 @@ def run(
 
     location = os.getenv("BQ_LOCATION", "US")
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-
-    # 1) Fetch BQ data
-    print(f"[bold]Running BigQuery query[/bold] from {query_file} ...")
-    bq_df = run_query_from_file(query_file, BQConfig(project_id=project_id, location=location))
-    bq_cache = cache_dir / "bq_raw.parquet"
-    bq_df.to_parquet(bq_cache, index=False)
-    print(f"Saved BQ raw to {bq_cache}")
-
-    # 2) Transform to pct_nbr
-    print("[bold]Applying Stata-like cleaning[/bold] to build pct_nbr ...")
-    pct_df = stata_like_pct_nbr(bq_df, publication_col="publication_number")
-    pct_cache = cache_dir / "pct_from_bq.csv"
-    pct_df.to_csv(pct_cache, index=False)
-    print(f"Saved pct list to {pct_cache} (n={len(pct_df):,})")
-
-    # 3) Load & filter regpat
-    print("[bold]Loading RegPat in chunks and filtering[/bold] ...")
-    regpat_filtered = load_regpat_filtered(
-        regpat_file,
-        pct_df["pct_nbr"].tolist(),
+    _execute_pipeline(
+        query_file=query_file,
+        regpat_file=regpat_file,
+        out_dir=out_dir,
+        cache_dir=cache_dir,
         chunksize=chunksize,
-        separator=regpat_sep,
+        regpat_sep=regpat_sep,
+        project_id=project_id,
+        location=location,
+        category_column=category_column,
     )
-    regpat_filtered = regpat_filtered.merge(
-        pct_df[["pct_nbr", "filing_date"]],
-        on="pct_nbr",
-        how="left",
-    )
-    regpat_cache = cache_dir / "regpat_filtered.parquet"
-    regpat_filtered.to_parquet(regpat_cache, index=False)
-    print(f"Saved filtered RegPat to {regpat_cache} (rows={len(regpat_filtered):,})")
-
-    # 4) Fractional counts
-    print("[bold]Computing fractional counts by inventor country[/bold] ...")
-    counts = fractional_counts_by_inventor_country(regpat_filtered)
-    out_csv = out_dir / "inventor_country_yearly_fractional_counts.csv"
-    counts.to_csv(out_csv, index=False)
-    print(f"Saved results to {out_csv}")
-
-    # Metadata
-    meta = {
-        "run_utc": datetime.now(timezone.utc).isoformat(),
-        "gcp_project_id": project_id,
-        "bq_location": location,
-        "query_file": str(query_file),
-        "regpat_file": str(regpat_file),
-        "n_pct_unique": int(len(pct_df)),
-        "n_regpat_rows_kept": int(len(regpat_filtered)),
-        "outputs": {"inventor_country_yearly_fractional_counts_csv": str(out_csv)},
-    }
-    meta_path = out_dir / "run_metadata.json"
-    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
-    print(f"Saved metadata to {meta_path}")
 
 
 def _load_report_config(path: Path) -> dict:
@@ -122,6 +82,97 @@ def _load_report_config(path: Path) -> dict:
         return defaults
     data = yaml.safe_load(path.read_text()) or {}
     return {**defaults, **data}
+
+
+def _execute_pipeline(
+    *,
+    query_file: Path,
+    regpat_file: Path,
+    out_dir: Path,
+    cache_dir: Path,
+    chunksize: int,
+    regpat_sep: str,
+    project_id: str,
+    location: str,
+    category_column: str | None = None,
+) -> None:
+    query_file = Path(query_file)
+    regpat_file = Path(regpat_file)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"[bold]Running BigQuery query[/bold] from {query_file} ...")
+    bq_df = run_query_from_file(query_file, BQConfig(project_id=project_id, location=location))
+    bq_cache = cache_dir / "bq_raw.parquet"
+    bq_df.to_parquet(bq_cache, index=False)
+    print(f"Saved BQ raw to {bq_cache}")
+
+    print("[bold]Applying Stata-like cleaning[/bold] to build pct_nbr ...")
+    extra_cols = ["filing_date"]
+    if category_column:
+        if category_column not in bq_df.columns:
+            raise typer.BadParameter(f"Category column '{category_column}' not found in query result.")
+        extra_cols.append(category_column)
+    pct_df = stata_like_pct_nbr(
+        bq_df,
+        publication_col="publication_number",
+        extra_columns=extra_cols,
+    )
+    pct_cache = cache_dir / "pct_from_bq.csv"
+    pct_df.to_csv(pct_cache, index=False)
+    print(f"Saved pct list to {pct_cache} (n={len(pct_df):,})")
+
+    print("[bold]Loading RegPat in chunks and filtering[/bold] ...")
+    regpat_filtered = load_regpat_filtered(
+        regpat_file,
+        pct_df["pct_nbr"].tolist(),
+        chunksize=chunksize,
+        separator=regpat_sep,
+    )
+    merge_cols = ["pct_nbr", "filing_date"]
+    if category_column and category_column in pct_df.columns:
+        merge_cols.append(category_column)
+    regpat_filtered = regpat_filtered.merge(
+        pct_df[merge_cols],
+        on="pct_nbr",
+        how="left",
+    )
+    regpat_cache = cache_dir / "regpat_filtered.parquet"
+    regpat_filtered.to_parquet(regpat_cache, index=False)
+    print(f"Saved filtered RegPat to {regpat_cache} (rows={len(regpat_filtered):,})")
+
+    print("[bold]Computing fractional counts by inventor country[/bold] ...")
+    counts = fractional_counts_by_inventor_country(regpat_filtered)
+    out_csv = out_dir / "inventor_country_yearly_fractional_counts.csv"
+    counts.to_csv(out_csv, index=False)
+    print(f"Saved results to {out_csv}")
+
+    category_outputs = {}
+    if category_column and category_column in regpat_filtered.columns:
+        for category_value, subset in regpat_filtered.dropna(subset=[category_column]).groupby(category_column):
+            cat_counts = fractional_counts_by_inventor_country(subset)
+            slug = _slugify(str(category_value))
+            cat_csv = out_dir / f"inventor_country_yearly_fractional_counts_{slug}.csv"
+            cat_counts.to_csv(cat_csv, index=False)
+            category_outputs[str(category_value)] = str(cat_csv)
+            print(f"  -> Saved category '{category_value}' counts to {cat_csv}")
+
+    meta = {
+        "run_utc": datetime.now(timezone.utc).isoformat(),
+        "gcp_project_id": project_id,
+        "bq_location": location,
+        "query_file": str(query_file),
+        "regpat_file": str(regpat_file),
+        "n_pct_unique": int(len(pct_df)),
+        "n_regpat_rows_kept": int(len(regpat_filtered)),
+        "outputs": {
+            "inventor_country_yearly_fractional_counts_csv": str(out_csv),
+            "categories": category_outputs,
+        },
+    }
+    meta_path = out_dir / "run_metadata.json"
+    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    print(f"Saved metadata to {meta_path}")
 
 
 @app.command()
@@ -159,6 +210,54 @@ def report(
     table_path = out_dir / "top_patenters.csv"
     table.to_csv(table_path, index=False)
     print(f"Saved top patenters table to {table_path}")
+
+
+@app.command()
+def run_config(
+    pipelines_config: Path = typer.Option(Path("config/pipelines.yml"), help="YAML config with pipelines."),
+    name: str = typer.Option(None, help="Optional pipeline name to run."),
+    chunksize: int = typer.Option(1_000_000, help="Chunk size for regpat reading."),
+):
+    """Execute one or more pipelines defined in a YAML config."""
+    load_dotenv()
+    project_id = os.getenv("GCP_PROJECT_ID")
+    if not project_id:
+        raise typer.BadParameter("Missing GCP_PROJECT_ID. Put it in your .env or environment variables.")
+    location = os.getenv("BQ_LOCATION", "US")
+
+    if not pipelines_config.exists():
+        raise typer.BadParameter(f"Config file not found at {pipelines_config}")
+
+    config = yaml.safe_load(pipelines_config.read_text()) or {}
+    defaults = config.get("defaults", {})
+    pipelines = config.get("pipelines", {})
+    if not pipelines:
+        raise typer.BadParameter("No pipelines defined in config.")
+
+    selected = {name: pipelines[name]} if name else pipelines
+    if name and name not in pipelines:
+        raise typer.BadParameter(f"Pipeline '{name}' not found. Available: {', '.join(pipelines)}")
+
+    for label, settings in selected.items():
+        print(f"\n[bold cyan]=== Running pipeline: {label} ===[/bold cyan]")
+        query_file = Path(settings["query_file"]).expanduser()
+        regpat_file = Path(settings.get("regpat_file", defaults.get("regpat_file", "data/raw/regpat.txt"))).expanduser()
+        out_dir = Path(settings.get("out_dir", defaults.get("out_dir", f"data/output/{label}")))
+        cache_dir = Path(settings.get("cache_dir", defaults.get("cache_dir", f"data/processed/{label}")))
+        regpat_sep = settings.get("regpat_sep", defaults.get("regpat_sep", "\t"))
+        category_column = settings.get("category_column", defaults.get("category_column"))
+
+        _execute_pipeline(
+            query_file=query_file,
+            regpat_file=regpat_file,
+            out_dir=out_dir,
+            cache_dir=cache_dir,
+            chunksize=chunksize,
+            regpat_sep=regpat_sep,
+            project_id=project_id,
+            location=location,
+            category_column=category_column,
+        )
 
 
 def _build_group_series(df: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
@@ -206,7 +305,7 @@ def _plot_timeseries(ts: pd.DataFrame, path: Path, title: str) -> None:
         loc="upper center",
         frameon=False,
         fontsize=10,
-        bbox_to_anchor=(0.5, -0.2),
+        bbox_to_anchor=(0.5, -0.18),
         ncol=3,
     )
     fig.subplots_adjust(left=0.12, right=0.98, top=0.90, bottom=0.28)
@@ -214,46 +313,50 @@ def _plot_timeseries(ts: pd.DataFrame, path: Path, title: str) -> None:
     plt.close(fig)
 
 
+
 def _plot_stacked_share(ts: pd.DataFrame, path: Path, title: str) -> None:
+    # 1. Prepare data
     share = ts.div(ts.sum(axis=1), axis=0).fillna(0)
     cols = list(share.columns)
-
+    
+    # 2. Setup Plot
     fig, ax = plt.subplots(figsize=(11, 5))
     palette = plt.get_cmap("tab20")
     colors = [palette(i) for i in range(len(cols))]
 
-    # Stackplot returns PolyCollections (handles)
-    polys = ax.stackplot(
+    # 3. Create Stackplot
+    ax.stackplot(
         share.index,
         share.values.T,
+        labels=cols,
         colors=colors,
-        edgecolor="white",
+        edgecolor='white',
         linewidth=0.2,
     )
 
-    # Label each handle explicitly
-    for poly, label in zip(polys, cols):
-        poly.set_label(label)
-
+    # Apply your custom style
     _apply_chad_style(ax, "Filing year", "Share of fractional patents", title)
+    
     ax.set_xlim(share.index.min(), share.index.max())
     ax.set_ylim(0, 1)
 
-    # Reserve space at bottom for legend (inside figure canvas)
-    fig.subplots_adjust(left=0.12, right=0.98, top=0.90, bottom=0.22)
-
-    # FIGURE-LEVEL legend (much more reliable than ax.legend for stackplot)
-    fig.legend(
-        handles=polys,
-        labels=cols,
+    # 4. The Legend (One single line)
+    ax.legend(
         loc="upper center",
-        ncol=min(len(cols), 6),
+        bbox_to_anchor=(0.5, -0.12), # Adjust this to bring it closer/further from axis
+        ncol=len(cols),              # Set columns to the number of items
         frameon=False,
         fontsize=10,
-        bbox_to_anchor=(0.5, 0.02),  # inside the figure
+        columnspacing=1.0            # Adjust spacing between items if they look cramped
     )
 
-    fig.savefig(path, dpi=300)
+    # 5. Save Logic
+    # bbox_inches="tight" will automatically expand the PNG to fit the legend
+    fig.savefig(
+        path, 
+        dpi=300, 
+        bbox_inches="tight"
+    )
     plt.close(fig)
 
 
@@ -301,6 +404,12 @@ def _add_axis_arrowheads(ax: plt.Axes) -> None:
         arrowprops=arrowprops,
         annotation_clip=False,
     )
+
+
+def _slugify(value: str) -> str:
+    slug = "".join(ch if ch.isalnum() else "_" for ch in value)
+    slug = "_".join(part for part in slug.split("_") if part)
+    return slug.lower() or "category"
 
 
 def _build_top_table(df: pd.DataFrame, recent_start: int) -> pd.DataFrame:
