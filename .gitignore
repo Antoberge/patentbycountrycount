@@ -1,0 +1,22 @@
+.venv/
+.env
+*.env
+__pycache__/
+*.pyc
+
+# Data + cache (keep structure by adding .gitkeep later if needed)
+data/
+!/data/.gitkeep
+
+# Credentials
+*.json
+
+# Outputs
+*.parquet
+*.csv
+
+# Logs
+logs/
+
+# macOS cruft
+.DS_Store
